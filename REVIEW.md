@@ -1,0 +1,24 @@
+# REVIEW.md
+
+List every defect you found in the starter `app/main.py` (helpers and endpoints). For each one:
+
+| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+|---|---|---|---|---|
+| 1 | Configuration/client | The starter silently used naïve datetimes and hard-coded fallbacks without bounded MongoDB readiness. | UTC/IST conversions differ by host timezone and an unavailable database still reported healthy. | Made the client timezone-aware, use explicit UTC conversion, and ping MongoDB in `/health` (503 on failure). |
+| 2 | `compute_late_minutes` | It used the server-local date, rounded incorrectly at seconds, and was not safe for IST or overnight records. | A 09:40:01 IST punch was reported incorrectly; overnight dates were wrong. | Calculate against IST attendance date and apply the strict ten-minute boundary with whole-minute flooring. |
+| 3 | `compute_work_hours` | Python `round` is banker's rounding, not the required half-up rule. | A duration at a `.005` boundary rounds down unexpectedly. | Use `Decimal` with `ROUND_HALF_UP`. |
+| 4 | `compute_overtime` | It ignored overnight shifts and counted overtime below the 30-minute threshold. | A 22:00–06:00 shift or a five-minute late exit produced an incorrect value. | Build the IST shift end on the correct day and return zero below 30 minutes. |
+| 5 | `health` | It always returned 200 without contacting MongoDB. | Stop MongoDB and call the endpoint. | Run `ping` and return 503 on a driver error. |
+| 6 | `create_employee` | Check-then-insert was racy; output exposed a BSON datetime and no unique index was created. | Parallel creates can both pass the read. | Unique index plus duplicate-key handling; serialize `created_at` to epoch milliseconds. |
+| 7 | `list_employees` | Offset was one page too far, total ignored filters, and order was unspecified. | Page 1 skipped the first 20; department total was wrong. | Correct offset, filtered count, indexed `emp_code` sort and validated pagination. |
+| 8 | `punch_in` | It accepted invalid timestamps/statuses, used local time, dereferenced missing employees, and used a racy existence check. | Unknown employee raises 500; concurrent punch-ins can duplicate. | Strict request models, 404 handling, R1 date logic, and a unique natural-key index. |
+| 9 | Attendance serialization | It returned `_id` as a public `id` and leaked BSON datetimes. | Contract response has an unexpected field and non-JSON BSON values. | Remove `_id` and recursively serialize all instants, including history changes. |
+| 10 | `list_attendance` | It loaded and sorted every record in Python and lacked deterministic secondary ordering. | Memory/time grows with a 100k-record collection. | Use Mongo filtering, count, sort, skip and limit with supporting indexes. |
+| 11 | Missing operations | Punch-out, regularization, analytics, trend, and explain routes were absent. | Seven contract paths returned complete404. | Implemented all remaining operations, aggregation pipelines, and explain support. |
+
+### Items examined and determined not to be defects
+
+1. **Natural key (`emp_code`, `date`) vs surrogate `_id`**: I verified whether attendance records should have had their own surrogate IDs or UUIDs. The specification explicitly defines attendance records as addressed by (`emp_code`, `date`), and using the natural composite key with an index is both idiomatic and ensures uniqueness without extra overhead.
+2. **String representations for calendar dates and shift times**: Dates (`YYYY-MM-DD`) and times (`HH:MM`) are kept as plain strings rather than converted to BSON timestamps. This is intentional per `DATA_MODEL.md` to avoid unwanted timezone conversions on calendar boundaries.
+3. **Omitting a standalone index on `status`**: I evaluated indexing `status` alone on `attendance_logs`. Given there are only 5 distinct status values, low selectivity makes a standalone index inefficient; compound indexes with date/emp_code provide superior performance.
+4. **Default empty array for `history`**: Records without regularizations store `history: []` (or omit it in legacy documents), which complies directly with the audit trail contract and OpenAPI schema.

@@ -1,0 +1,7 @@
+# DECISIONS.md  (about 150-200 words in total - plain language, your own words)
+
+1. **Indexes.** `employees.emp_code` is unique for identity and employee lookups. `department, joined_on` and `joined_on` support department headcount and trend eligibility with or without department filters. Attendance has the unique natural key `emp_code, date`, plus date/employee and employee/date indexes for ordered lists, month ranges, and joins. I rejected a standalone `status` index: it has low selectivity and is not a useful leading key for the supported queries.
+2. **Punch-in race.** Both requests calculate the same natural key and try an insert; there is deliberately no check-then-insert path. MongoDB accepts the first insert protected by the unique index. Every competing insert receives duplicate-key, which is translated into HTTP 409. This remains correct across multiple application processes.
+3. **Ties.** The pipeline uses `$rank`, not an array position, so equal late-minute totals receive the same competition rank. It applies `rank <= limit` after ranking. A tie at the cutoff therefore returns every tied employee, with employee code as the deterministic secondary sort.
+4. **Headcount.** The department aggregation starts from employees who joined by the month end and left-joins attendance. That preserves employees with zero logs and counts each eligible employee once.
+5. **At 100x scale** I would partition/archive old attendance, maintain reporting aggregates, and route expensive analytics to read replicas.

@@ -1,0 +1,24 @@
+# Ignore everything by default
+/*
+.*
+
+# Allow .gitignore
+!/.gitignore
+
+# Allow only app/main.py
+!/app/
+/app/*
+!/app/main.py
+
+# Allow submission files
+!/requirements.txt
+!/REVIEW.md
+!/DECISIONS.md
+!/README.md
+
+# Strictly ignore environments and caches
+.env
+.env.*
+.venv/
+__pycache__/
+*.py[cod]
