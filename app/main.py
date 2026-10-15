@@ -28,6 +28,7 @@ def as_date(s: str) -> Date:
 def month_range(s: str) -> tuple[Date, Date]:
     try: start = datetime.strptime(s, "%Y-%m").date().replace(day=1)
     except (TypeError, ValueError): error("month must be YYYY-MM")
+    if len(s) != 7 or start.strftime("%Y-%m") != s: error("month must be YYYY-MM")
     return start, start.replace(day=calendar.monthrange(start.year, start.month)[1])
 def ms(v: Any) -> int:
     if type(v) is not int or not MIN_MS <= v <= MAX_MS: error("timestamp must be an epoch-millisecond integer")
@@ -105,19 +106,28 @@ class PunchInIn(BaseModel):
     model_config = ConfigDict(extra="ignore"); emp_code: str; punched_at: Optional[StrictInt] = None; status: Literal["PRESENT", "WFH", "ON_DUTY"] = "PRESENT"
     @field_validator("punched_at")
     @classmethod
-    def valid_ms(cls, v): return None if v is None else ms(v)
+    def valid_ms(cls, v):
+        if v is None: raise ValueError("punched_at cannot be null")
+        return ms(v)
 class PunchOutIn(BaseModel):
     model_config = ConfigDict(extra="ignore"); emp_code: str; punched_at: Optional[StrictInt] = None
     @field_validator("punched_at")
     @classmethod
-    def valid_ms(cls, v): return None if v is None else ms(v)
+    def valid_ms(cls, v):
+        if v is None: raise ValueError("punched_at cannot be null")
+        return ms(v)
 class RegularizeIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None; punch_in: Optional[StrictInt] = None; punch_out: Optional[StrictInt] = None
     reason: str = Field(min_length=5, max_length=200); regularized_by: str = Field(min_length=1, max_length=50)
+    @field_validator("status", "punch_in", "punch_out")
+    @classmethod
+    def not_none_if_supplied(cls, v):
+        if v is None: raise ValueError("field cannot be null")
+        return v
     @field_validator("punch_in", "punch_out")
     @classmethod
-    def valid_ms(cls, v): return None if v is None else ms(v)
+    def valid_ms(cls, v): return ms(v)
 
 @app.get("/health")
 def health():
@@ -207,7 +217,7 @@ def employee_monthly(emp_code: str, month: str):
 def summary_pipeline(start, end, department):
     match = {"joined_on": {"$lte": end.isoformat()}}
     if department is not None: match["department"] = department
-    return [{"$match": match}, {"$lookup": {"from": "attendance_logs", "let": {"code": "$emp_code", "joined": "$joined_on"}, "pipeline": [{"$match": {"$expr": {"$and": [{"$eq": ["$emp_code", "$$code"]}, {"$gte": ["$date", start.isoformat()]}, {"$gte": ["$date", "$$joined"]}, {"$lte": ["$date", end.isoformat()]}]}}}, {"$set": {"wd": {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}}}], "as": "logs"}}, {"$unwind": {"path": "$logs", "preserveNullAndEmptyArrays": True}}, {"$group": {"_id": "$department", "people": {"$addToSet": "$emp_code"},
+    return [{"$match": match}, {"$lookup": {"from": "attendance_logs", "let": {"code": "$emp_code"}, "pipeline": [{"$match": {"$expr": {"$and": [{"$eq": ["$emp_code", "$$code"]}, {"$gte": ["$date", start.isoformat()]}, {"$lte": ["$date", end.isoformat()]}]}}}, {"$set": {"wd": {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}}}}], "as": "logs"}}, {"$unwind": {"path": "$logs", "preserveNullAndEmptyArrays": True}}, {"$group": {"_id": "$department", "people": {"$addToSet": "$emp_code"},
         "present_days": {"$sum": {"$cond": [{"$and": [{"$in": ["$logs.status", list(PRESENT)]}, {"$gte": ["$logs.wd", 2]}, {"$lte": ["$logs.wd", 6]}]}, {"$cond": [{"$ifNull": ["$logs.half_day", False]}, .5, 1]}, 0]}},
         "works": {"$push": {"$cond": [{"$and": [{"$in": ["$logs.status", list(PRESENT)]}, {"$ne": [{"$ifNull": ["$logs.work_hours", None]}, None]}]}, "$logs.work_hours", "$$REMOVE"]}}, "late_count": {"$sum": {"$cond": [{"$gt": [{"$ifNull": ["$logs.late_minutes", 0]}, 0]}, 1, 0]}}, "total_late_minutes": {"$sum": {"$ifNull": ["$logs.late_minutes", 0]}}, "leave_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "LEAVE"]}, 1, 0]}}, "on_duty_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "ON_DUTY"]}, 1, 0]}}}}, {"$project": {"_id": 0, "department": "$_id", "headcount": {"$size": "$people"}, "present_days": 1, "avg_work_hours": {"$cond": [{"$gt": [{"$size": "$works"}, 0]}, {"$avg": "$works"}, None]}, "late_count": 1, "total_late_minutes": 1, "leave_count": 1, "on_duty_count": 1}}, {"$sort": {"department": 1}}]
 @app.get("/analytics/departments/summary")
