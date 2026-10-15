@@ -76,9 +76,10 @@ def attendance_json(doc: dict) -> dict:
     for k, v in (("history", []), ("half_day", False), ("late_minutes", 0), ("overtime_minutes", 0), ("work_hours", None), ("punch_out", None)): out.setdefault(k, v)
     return out
 
-@app.on_event("startup")
-def create_indexes():
-    try:
+indexes_ready = False
+def ensure_indexes():
+    global indexes_ready
+    if not indexes_ready:
         db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="uniq_employee_code")
         db.employees.create_index([("department", ASCENDING), ("joined_on", ASCENDING)], name="department_joined")
         db.employees.create_index([("joined_on", ASCENDING)], name="joined_on")
@@ -86,9 +87,12 @@ def create_indexes():
         db.attendance_logs.create_index([("date", DESCENDING), ("emp_code", ASCENDING)], name="attendance_listing")
         db.attendance_logs.create_index([("emp_code", ASCENDING), ("date", DESCENDING)], name="employee_month")
         db.attendance_logs.create_index([("date", ASCENDING), ("emp_code", ASCENDING)], name="date_employee")
-    except PyMongoError:
-        # The process stays alive so the readiness endpoint can accurately report 503.
-        pass
+        indexes_ready = True
+
+@app.on_event("startup")
+def create_indexes():
+    try: ensure_indexes()
+    except PyMongoError: pass
 
 class EmployeeIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -131,8 +135,10 @@ class RegularizeIn(BaseModel):
 
 @app.get("/health")
 def health():
-    try: db.command("ping")
-    except PyMongoError: raise HTTPException(503, "MongoDB unavailable")
+    try:
+        db.command("ping")
+        ensure_indexes()
+    except PyMongoError: raise HTTPException(503, "MongoDB unavailable or indexes not ready")
     return {"status": "ok"}
 @app.post("/employees", status_code=201)
 def create_employee(body: EmployeeIn):
@@ -212,7 +218,7 @@ def employee_monthly(emp_code: str, month: str):
     start, end = month_range(month); emp = db.employees.find_one({"emp_code": emp_code})
     if not emp: raise HTTPException(404, "employee not found")
     total = next(iter(db.attendance_logs.aggregate(monthly_pipeline(emp_code, start, end))), {}); days = weekday_count(start, end, emp["joined_on"]); present = total.get("present_days", 0)
-    return {"emp_code": emp_code, "month": month, "working_days": days, "present_days": present, "leave_days": total.get("leave_days", 0), "late_count": total.get("late_count", 0), "total_late_minutes": total.get("total_late_minutes", 0), "total_overtime_minutes": total.get("total_overtime_minutes", 0), "attendance_pct": rounded(Decimal(str(present))*100/days, 2) if days else None}
+    return {"emp_code": emp_code, "month": month, "working_days": days, "present_days": present, "leave_days": total.get("leave_days", 0), "late_count": total.get("late_count", 0), "total_late_minutes": total.get("total_late_minutes", 0), "total_overtime_minutes": total.get("total_overtime_minutes", 0), "attendance_pct": rounded(Decimal(str(present))*100/days, 4) if days else None}
 
 def summary_pipeline(start, end, department):
     match = {"joined_on": {"$lte": end.isoformat()}}
@@ -242,7 +248,7 @@ def trend_pipeline(department, start, end):
 def department_trend(department: str, from_: Annotated[str, Query(alias="from")], to: str):
     start, end = as_date(from_), as_date(to)
     if end < start: error("to must not be before from")
-    if (end-start).days > 92: error("range may not exceed 92 days")
+    if (end-start).days + 1 > 92: error("range may not exceed 92 days")
     if not db.employees.find_one({"department": department}, {"_id": 1}): raise HTTPException(404, "department not found")
     rows = db.command("aggregate", 1, pipeline=trend_pipeline(department, start, end), cursor={})["cursor"]["firstBatch"]
     for row in rows:
@@ -271,6 +277,6 @@ def explain(endpoint: Literal["attendance_list", "employee_monthly", "department
     else:
         if not department or not from_ or not to: error("department, from and to are required")
         start, end = as_date(from_), as_date(to)
-        if end < start or (end-start).days > 92: error("invalid trend range")
+        if end < start or (end-start).days + 1 > 92: error("invalid trend range")
         command, collection = {"explain": {"aggregate": 1, "pipeline": trend_pipeline(department, start, end), "cursor": {}}, "verbosity": "executionStats"}, "database"
     return {"endpoint": endpoint, "collection": collection, "explain": json_value(db.command(command))}
